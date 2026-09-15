@@ -67,7 +67,7 @@ def evaluate(d,price=None,volume=None):
     elif sum(cond.values())>=4:status='FORMING'
     else:status='NEAR MISS'
     swing=float(x.tail(20).low.min());stop=max(0,min(p*.85,swing*.99))
-    return {'status':status,'score':score,'price':p,'breakout_level':breakout,'distance_pct':dist,'stop':stop,'target1':max(breakout,p)*1.08,'target2':max(breakout,p)*1.15,'ema220':float(r.ema220),'sma50':float(r.sma50),'sma150':float(r.sma150),'low52':float(r.low52),'high52':float(r.high52),'volume':v,'avgvol20':float(r.avgvol20) if pd.notna(r.avgvol20) else np.nan,'confirmed_close':confirmed,'conditions':cond}
+    return {'status':status,'score':score,'price':p,'breakout_level':breakout,'distance_pct':dist,'stop':stop,'target1':max(breakout,p)*1.08,'target2':max(breakout,p)*1.15,'ema220':float(r.ema220),'sma50':float(r.sma50),'sma150':float(r.sma150),'low52':float(r.low52),'high52':float(r.high52),'volume':v,'avgvol20':float(r.avgvol20) if pd.notna(r.avgvol20) else np.nan,'confirmed_close':confirmed,'conditions':cond,'volume_ratio':(v/r.avgvol20 if pd.notna(r.avgvol20) and r.avgvol20 else np.nan),'range_ratio':(r.range_pct/r.avg_range20 if pd.notna(r.avg_range20) and r.avg_range20 else np.nan)}
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def master():
@@ -187,11 +187,50 @@ for c,l in zip(cs,labels):
     with c:st.metric(l,f'{p:,.2f}' if p is not None else 'N/A',f'{d:+.2f}%' if d is not None else None)
 st.divider()
 
+def status_badge(status):
+    icons={'TRIGGERED':'🟢','READY':'🟡','BREAKOUT WATCH':'🔵','FORMING':'🟣','NEAR MISS':'⚪'}
+    return f"{icons.get(status,'⚪')} {status}"
+
+def money(x):
+    return f'₹{x:,.2f}' if pd.notna(x) else '—'
+
+def setup_chart(token,key,symbol,days=180):
+    d=history(token,key).tail(days).copy();x=indicators(d)
+    fig=go.Figure()
+    fig.add_trace(go.Candlestick(x=x.timestamp,open=x.open,high=x.high,low=x.low,close=x.close,name='Price'))
+    fig.add_trace(go.Scatter(x=x.timestamp,y=x.sma50,name='SMA 50',line={'width':1.4}))
+    fig.add_trace(go.Scatter(x=x.timestamp,y=x.sma150,name='SMA 150',line={'width':1.4}))
+    fig.add_trace(go.Scatter(x=x.timestamp,y=x.ema220,name='EMA 220',line={'width':1.8}))
+    return x,fig
+
 if page=='Dashboard':
-    st.markdown('### 🔥 Highest Conviction Setups');df=st.session_state.get('scan_results')
-    if df is None or df.empty:st.info('Run the Full NSE Live Scan to populate this table with fresh Upstox data.')
+    st.markdown('### 🔥 Highest Conviction Setups')
+    df=st.session_state.get('scan_results')
+    if df is None or df.empty:
+        st.info('Run the Full NSE Live Scan to populate fresh Upstox setups.')
     else:
-        show=df[['symbol','status','score','price','breakout_level','distance_pct','stop','target1','target2']].copy();show.columns=['Stock','Status','Score','Live Price','Breakout','Distance %','Risk Stop','Target 1','Target 2'];st.dataframe(show.head(25),use_container_width=True,hide_index=True)
+        ranked=df.copy().head(10)
+        st.caption('Strict ranking: strategy conditions → breakout proximity → volume/range quality. Only the strongest setups are shown.')
+        for _,r in ranked.iterrows():
+            with st.container(border=True):
+                a,b,c,d=st.columns([1.5,1.2,1.2,1.2])
+                a.markdown(f"### {r.symbol}")
+                a.caption(status_badge(r.status))
+                b.metric('Score',int(r.score))
+                c.metric('Live price',money(r.price))
+                d.metric('Breakout',money(r.breakout_level),f"{r.distance_pct:+.2f}%")
+                e,f,g,h=st.columns(4)
+                e.metric('Stop',money(r.stop))
+                f.metric('Target 1',money(r.target1))
+                g.metric('Target 2',money(r.target2))
+                vr=r.get('volume_ratio',np.nan)
+                h.metric('Vol / Avg20',f"{vr:.2f}x" if pd.notna(vr) else '—')
+                st.caption(f"EMA220 {money(r.ema220)} • SMA50 {money(r.sma50)} • SMA150 {money(r.sma150)} • 52W high {money(r.high52)} • 52W low {money(r.low52)}")
+        st.markdown('#### Quick ranking')
+        show=ranked[['symbol','status','score','price','breakout_level','distance_pct','stop','target1','target2']].copy()
+        show.columns=['Stock','Status','Score','Live Price','Breakout','Distance %','Stop','Target 1','Target 2']
+        for col in ['Live Price','Breakout','Stop','Target 1','Target 2']:show[col]=show[col].map(lambda x:round(float(x),2) if pd.notna(x) else np.nan)
+        st.dataframe(show,use_container_width=True,hide_index=True)
     st.success(f'🟢 Live Upstox connection • {datetime.now():%d-%m-%Y %H:%M:%S}')
 elif page=='Live Scanner':
     st.markdown('### ⚡ Live Scanner');st.caption('Every run pulls fresh Upstox quotes for the NSE equity universe, then calculates the strict strategy only for the strongest live candidates.')
@@ -212,12 +251,39 @@ elif page=='Live Scanner':
         cols=[c for c in ['symbol','status','score','price','breakout_level','distance_pct','stop','target1','target2','ema220','sma50','sma150','low52','high52','confirmed_close'] if c in df];st.dataframe(df[cols],use_container_width=True,hide_index=True)
         a,b,c=st.columns(3);a.metric('Triggered',int((df.status=='TRIGGERED').sum()));b.metric('Ready',int((df.status=='READY').sum()));c.metric('Forming',int((df.status=='FORMING').sum()));st.caption(f"Last scan: {st.session_state.get('scan_time')} • Source: Upstox V3")
 elif page=='Top Setups':
-    df=st.session_state.get('scan_results');st.info('Run the Live Scanner first.') if df is None or df.empty else st.dataframe(df.head(20),use_container_width=True,hide_index=True)
+    df=st.session_state.get('scan_results')
+    if df is None or df.empty:st.info('Run the Live Scanner first.')
+    else:
+        st.markdown('### 🏆 Top Setups')
+        for _,r in df.head(20).iterrows():
+            st.markdown(f"**{r.symbol}** — {status_badge(r.status)} — Score **{int(r.score)}** — Entry/live **{money(r.price)}** — Breakout **{money(r.breakout_level)}** — Stop **{money(r.stop)}** — T1 **{money(r.target1)}** — T2 **{money(r.target2)}**")
+            st.divider()
 elif page=='SMC Charts':
     df=st.session_state.get('scan_results')
     if df is None or df.empty:st.info('Run the Live Scanner first.')
     else:
-        s=st.selectbox('Select scanned stock',df.symbol.astype(str).tolist());r=df[df.symbol.astype(str)==s].iloc[0];d=history(TOKEN,str(r.instrument_key)).tail(120);fig=go.Figure(go.Candlestick(x=d.timestamp,open=d.open,high=d.high,low=d.low,close=d.close));fig.update_layout(template='plotly_dark',height=520,title=f'{s} • Daily structure');st.plotly_chart(fig,use_container_width=True);st.caption('Dedicated SMC order-block/FVG/BOS/CHOCH detection will be added after the live scanner foundation is validated.')
+        st.markdown('### 📊 SMC / Market Structure Chart')
+        s=st.selectbox('Select scanned stock',df.symbol.astype(str).tolist())
+        r=df[df.symbol.astype(str)==s].iloc[0]
+        x,fig=setup_chart(TOKEN,str(r.instrument_key),s,180)
+        # Breakout reference from the evaluated completed history.
+        fig.add_hline(y=float(r.breakout_level),line_dash='dash',annotation_text='52W breakout',annotation_position='top left')
+        fig.add_hline(y=float(r.ema220),line_dash='dot',annotation_text='EMA220',annotation_position='bottom right')
+        # Lightweight, transparent structure markers: confirmed higher-high break and recent swing points.
+        if len(x)>=12:
+            highs=x.high.rolling(5,center=True).max();lows=x.low.rolling(5,center=True).min()
+            swing_hi=x[(x.high==highs)&highs.notna()].tail(8);swing_lo=x[(x.low==lows)&lows.notna()].tail(8)
+            if not swing_hi.empty:
+                fig.add_trace(go.Scatter(x=swing_hi.timestamp,y=swing_hi.high,mode='markers',name='Swing High',marker={'size':7,'symbol':'triangle-up'}))
+            if not swing_lo.empty:
+                fig.add_trace(go.Scatter(x=swing_lo.timestamp,y=swing_lo.low,mode='markers',name='Swing Low',marker={'size':7,'symbol':'triangle-down'}))
+        fig.update_layout(template='plotly_dark',height=560,margin={'l':10,'r':10,'t':45,'b':10},title=f'{s} • Daily structure')
+        st.plotly_chart(fig,use_container_width=True)
+        a,b,c,d=st.columns(4);a.metric('Status',r.status);b.metric('Score',int(r.score));c.metric('Live',money(r.price));d.metric('Breakout',money(r.breakout_level),f"{r.distance_pct:+.2f}%")
+        st.markdown('#### Strategy checklist')
+        cond=r.get('conditions',{})
+        for label,ok in cond.items():st.write(('✅' if bool(ok) else '❌')+f' {label}')
+        st.caption('Chart overlays show SMA50, SMA150, EMA220, breakout reference and swing structure. FVG/order-block/BOS/CHOCH detection will be expanded in the next SMC build; no pattern is fabricated.')
 elif page=='Settings':
     st.markdown('### ⚙️ Settings');st.write(f'NSE equity universe: **{len(uni):,}**');st.write('Upstox API: **V3**');st.write('Order execution: **Disabled**');st.write('Token display: **Never**')
 else:st.info(f'{page} module is queued for the next build stage. Live Upstox connectivity remains active.')
